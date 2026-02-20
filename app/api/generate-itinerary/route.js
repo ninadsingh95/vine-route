@@ -1,54 +1,91 @@
-"use client";
+import Anthropic from "@anthropic-ai/sdk";
+import { NextResponse } from "next/server";
 
-import { useEffect, useRef } from "react";
-import L from "leaflet";
+export async function POST(request) {
+  try {
+    const { region, startDate, endDate, vibe, group, budget, regionLat, regionLng } = await request.json();
 
-export default function MapView({ stops, regionLat, regionLng }) {
-  const mapRef = useRef(null);
-  const mapInstance = useRef(null);
-  const layers = useRef([]);
-
-  useEffect(() => {
-    if (mapInstance.current) return;
-    const lat = regionLat || 44.0;
-    const lng = regionLng || 2.0;
-    const m = L.map(mapRef.current, { scrollWheelZoom: true, zoomControl: false }).setView([lat, lng], 10);
-    L.control.zoom({ position: "bottomright" }).addTo(m);
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-      attribution: "© OpenStreetMap © CARTO", maxZoom: 19,
-    }).addTo(m);
-    mapInstance.current = m;
-    return () => { m.remove(); mapInstance.current = null; };
-  }, []);
-
-  useEffect(() => {
-    const m = mapInstance.current;
-    if (!m) return;
-    layers.current.forEach(l => m.removeLayer(l));
-    layers.current = [];
-    if (!stops?.length) {
-      if (regionLat && regionLng) m.setView([regionLat, regionLng], 10);
-      return;
+    if (!region || !startDate || !endDate || !vibe) {
+      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
-    const pts = stops.map(s => [s.lat, s.lng]);
-    if (pts.length > 1) {
-      const pl = L.polyline(pts, { color: "#C4705A", weight: 3, opacity: 0.5, dashArray: "6,8" }).addTo(m);
-      layers.current.push(pl);
+
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return NextResponse.json({ error: "API key not configured" }, { status: 500 });
     }
-    const bounds = [];
-    stops.forEach((s, i) => {
-      const ico = L.divIcon({
-        className: "x",
-        html: '<div style="width:32px;height:32px;border-radius:10px;background:' + (i === 0 ? "linear-gradient(135deg,#C4705A,#E8967E)" : "linear-gradient(135deg,#5B5F52,#8A9178)") + ';color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;font-family:Outfit,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,0.2)">' + (i+1) + '</div>',
-        iconSize: [32, 32], iconAnchor: [16, 16],
-      });
-      const mk = L.marker([s.lat, s.lng], { icon: ico }).addTo(m)
-        .bindPopup('<div style="font-family:Outfit,sans-serif;padding:4px"><strong>' + s.name + '</strong><br/><span style="font-size:12px;color:#888">' + (s.time||"") + '</span></div>');
-      layers.current.push(mk);
-      bounds.push([s.lat, s.lng]);
+
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const prompt = `You are a world-class wine travel concierge. Create a detailed 1-2 day wine trip itinerary for ${region}.
+
+TRIP DETAILS:
+- Dates: ${startDate} to ${endDate}
+- Vibe: ${vibe}
+- Group: ${group || "Not specified"}
+- Budget: ${budget || "Not specified"}
+- Region center coordinates: ${regionLat}, ${regionLng}
+
+REQUIREMENTS:
+1. Plan 4-6 stops per day (wineries, restaurants, experiences)
+2. Route them logically so driving flows in one direction — NO backtracking
+3. For each winery: include actual well-known wineries in this region, their wine ratings (use typical critic scores if known), whether reservations are required or walk-in, and if reservations are typically hard to get
+4. Include the vibe/atmosphere of each stop
+5. Include 1 lunch and 1 dinner recommendation per day that fits the vibe
+6. Add pro tips for each stop
+7. Each stop needs approximate lat/lng coordinates (realistic for the region)
+8. Include drive times between stops
+
+Respond ONLY with a JSON object (no markdown, no backticks, no preamble) in this exact format:
+{
+  "title": "A catchy trip title",
+  "summary": "2-3 sentence overview of the trip",
+  "days": [
+    {
+      "dayNumber": 1,
+      "title": "Day title",
+      "stops": [
+        {
+          "name": "Winery or Restaurant Name",
+          "subtitle": "Brief tagline",
+          "lat": 38.50,
+          "lng": -122.26,
+          "time": "10:00 AM",
+          "rating": "4.6",
+          "vibe": "Description of the atmosphere and feel",
+          "wineHighlights": "Their standout wines to try",
+          "wineRating": "e.g. 94-97 pts Robert Parker",
+          "reservation": "Walk-in | Recommended | Required",
+          "reservationNote": "e.g. Book 2-3 weeks ahead",
+          "driveTime": "e.g. 12 min from previous stop",
+          "proTip": "Insider tip for this stop",
+          "type": "winery | restaurant | experience"
+        }
+      ]
+    }
+  ],
+  "packingTips": "Brief packing advice",
+  "bestTimeToVisit": "Quick note on timing"
+}`;
+
+    const message = await client.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4000,
+      messages: [{ role: "user", content: prompt }],
     });
-    if (bounds.length) m.fitBounds(bounds, { padding: [50, 50], maxZoom: 13 });
-  }, [stops, regionLat, regionLng]);
 
-  return <div ref={mapRef} style={{ width: "100%", height: "100%", borderRadius: 16 }} />;
+    const text = message.content
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .filter(Boolean)
+      .join("\n");
+
+    const clean = text.replace(/```json|```/g, "").trim();
+    const itinerary = JSON.parse(clean);
+
+    return NextResponse.json(itinerary);
+  } catch (err) {
+    console.error("API Error:", err);
+    return NextResponse.json(
+      { error: "Failed to generate itinerary. Please try again." },
+      { status: 500 }
+    );
+  }
 }
